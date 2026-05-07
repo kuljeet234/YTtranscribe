@@ -138,20 +138,43 @@ def is_meaningful(text):
     meaningful_words = [word for word in words if word not in STOP_WORDS]
     return len(meaningful_words) > 2  # Require at least 3 meaningful words
 
-def compute_bert_embeddings(text):
+def compute_bert_embeddings(text, max_chunk_tokens=510):
     """
-    Compute BERT embeddings for a given text.
-    Replace this function with your preferred BERT embedding library (e.g., Hugging Face Transformers).
+    Compute a BERT embedding for `text` using the [CLS] token of bert-base-uncased.
+
+    Long inputs are chunked to fit BERT's 512-token limit (510 + [CLS] + [SEP])
+    and the resulting per-chunk embeddings are mean-pooled to a single 768-d vector.
     """
-    # Dummy implementation; replace with actual embedding computation.
-    return np.random.rand(768)
+    if not text or not text.strip():
+        return np.zeros(768, dtype=np.float32)
+
+    token_ids = bert_tokenizer.encode(text, add_special_tokens=False)
+    if not token_ids:
+        return np.zeros(768, dtype=np.float32)
+
+    chunk_embeddings = []
+    cls_id = bert_tokenizer.cls_token_id
+    sep_id = bert_tokenizer.sep_token_id
+
+    for start in range(0, len(token_ids), max_chunk_tokens):
+        chunk = token_ids[start:start + max_chunk_tokens]
+        input_ids = torch.tensor([[cls_id, *chunk, sep_id]])
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            output = bert_model(input_ids=input_ids, attention_mask=attention_mask)
+
+        cls_vector = output.last_hidden_state[0, 0, :].cpu().numpy()
+        chunk_embeddings.append(cls_vector)
+
+    return np.mean(chunk_embeddings, axis=0)
 
 def normalize_embeddings(embeddings):
     """Normalize embeddings to unit vectors."""
     norm = np.linalg.norm(embeddings, axis=1, keepdims=True) if embeddings.ndim > 1 else np.linalg.norm(embeddings)
     return embeddings / (norm + 1e-10)
 
-def search_transcriptions_by_context(input_text, json_file='/Users/kuljeetsinghshekhawat/Documents/coding/YTtranscribe/video_transcriptions.json'):
+def search_transcriptions_by_context(input_text, json_file='video_transcriptions.json'):
     """
     Search for videos whose transcriptions match the context of the input text.
     """
