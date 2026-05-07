@@ -20,7 +20,7 @@ model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny")
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 bert_model = BertModel.from_pretrained('bert-base-uncased')
 
-def download_youtube_video(video_url, output_folder=r"/Users/kuljeetsinghshekhawat/Documents/coding/YTtranscribe/download"):
+def download_youtube_video(video_url, output_folder="download"):
     """Download a YouTube video to the specified output folder."""
     video_file_name = "VideoForTranscription.webm"  # Fixed file name
     video_path = os.path.join(output_folder, video_file_name)
@@ -31,8 +31,11 @@ def download_youtube_video(video_url, output_folder=r"/Users/kuljeetsinghshekhaw
     ydl_opts = {
         'outtmpl': video_path,  # File will be saved as VideoForTranscription.webm
         'quiet': False,  # Set to False to show download progress
-        'ffmpeg_location': r"/opt/homebrew/bin/ffmpeg",  # Provide the path to ffmpeg if necessary
     }
+    # ffmpeg location can be overridden via env var; otherwise rely on PATH.
+    ffmpeg_path = os.environ.get("FFMPEG_PATH")
+    if ffmpeg_path:
+        ydl_opts['ffmpeg_location'] = ffmpeg_path
 
 
 
@@ -97,7 +100,8 @@ def transcribe_video(video_path):
 
     # Step 2: Transcribe the extracted audio with chunking
     transcription = transcribe_audio(audio_path, segment_duration=30)
-    os.remove(r"/Users/kuljeetsinghshekhawat/Documents/coding/YTtranscribe/download/VideoForTranscription.webm")
+    if os.path.exists(video_path):
+        os.remove(video_path)
 
     return transcription
 
