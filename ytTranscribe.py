@@ -12,13 +12,17 @@ import nltk
 from nltk.corpus import stopwords
 import re
 
-# Load Whisper model and processor
-processor = WhisperProcessor.from_pretrained("openai/whisper-tiny")
-model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny")
+# distil-whisper/distil-small.en — English-only, ~5x faster than whisper-tiny
+# at materially higher accuracy. Override via env var if you need
+# multilingual or a different size.
+WHISPER_MODEL_ID = os.environ.get("WHISPER_MODEL", "distil-whisper/distil-small.en")
+processor = WhisperProcessor.from_pretrained(WHISPER_MODEL_ID)
+model = WhisperForConditionalGeneration.from_pretrained(WHISPER_MODEL_ID)
 
 # Load BERT model and tokenizer
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 bert_model = BertModel.from_pretrained('bert-base-uncased')
+
 
 def download_youtube_video(video_url, output_folder="download"):
     """Download a YouTube video to the specified output folder."""
@@ -29,15 +33,12 @@ def download_youtube_video(video_url, output_folder="download"):
     os.makedirs(output_folder, exist_ok=True)
 
     ydl_opts = {
-        'outtmpl': video_path,  # File will be saved as VideoForTranscription.webm
-        'quiet': False,  # Set to False to show download progress
+        'outtmpl': video_path,
+        'quiet': False,
     }
-    # ffmpeg location can be overridden via env var; otherwise rely on PATH.
     ffmpeg_path = os.environ.get("FFMPEG_PATH")
     if ffmpeg_path:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
-
-
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(video_url, download=True)
@@ -46,11 +47,13 @@ def download_youtube_video(video_url, output_folder="download"):
     print(f"Download completed! Video saved to: {video_path}")
     return video_path, video_title
 
+
 def extract_audio(video_path, output_audio_path):
     """Extract audio from the video file."""
     video_clip = VideoFileClip(video_path)
     video_clip.audio.write_audiofile(output_audio_path)
     video_clip.close()
+
 
 def split_audio(audio, sr, segment_duration=30):
     """Split audio into chunks of the specified duration (in seconds)."""
@@ -67,15 +70,17 @@ def split_audio(audio, sr, segment_duration=30):
 
     return segments
 
+
 def transcribe_audio_chunk(audio_chunk, sr):
     """Transcribe a single chunk of audio."""
     inputs = processor(audio_chunk, return_tensors="pt", sampling_rate=sr)
 
     with torch.no_grad():
         generated_ids = model.generate(inputs.input_features)
-    
+
     transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
     return transcription
+
 
 def transcribe_audio(audio_path, segment_duration=30):
     """Transcribe the entire audio file by splitting it into chunks."""
@@ -87,60 +92,72 @@ def transcribe_audio(audio_path, segment_duration=30):
         transcription = transcribe_audio_chunk(chunk, sr)
         transcriptions.append(transcription)
 
-    # Combine all transcriptions
     full_transcription = ' '.join(transcriptions)
     return full_transcription
+
 
 def transcribe_video(video_path):
     """Complete process of extracting and transcribing audio from video."""
     audio_path = os.path.join(os.path.dirname(video_path), 'extracted_audio.wav')
 
-    # Step 1: Extract audio from video
     extract_audio(video_path, audio_path)
-
-    # Step 2: Transcribe the extracted audio with chunking
     transcription = transcribe_audio(audio_path, segment_duration=30)
     if os.path.exists(video_path):
         os.remove(video_path)
 
     return transcription
 
+
+def _load_store(json_file):
+    if not os.path.exists(json_file):
+        return {}
+    with open(json_file, 'r') as f:
+        return json.load(f)
+
+
+def _write_store(json_file, data):
+    with open(json_file, 'w') as f:
+        json.dump(data, f, indent=4)
+
+
 def save_transcription_to_json(video_link, transcription, json_file='video_transcriptions.json'):
-    """Save the transcription to a JSON file in the specified format."""
-    # Load existing data
-    data = {}
-    if os.path.exists(json_file):
-        with open(json_file, 'r') as file:
-            data = json.load(file)
+    """
+    Save the transcription AND its precomputed BERT embedding to the JSON
+    store so search doesn't have to recompute embeddings on every query.
+    Schema: {video_link: {"transcription": str, "embedding": list[float]}}.
+    """
+    data = _load_store(json_file)
 
-    # Add new transcription
-    data[video_link] = transcription
+    cleaned = clean_text(transcription)
+    embedding = compute_bert_embeddings(cleaned).tolist() if is_meaningful(cleaned) else None
 
-    # Save updated data back to the JSON file
-    with open(json_file, 'w') as file:
-        json.dump(data, file, indent=4)
-    
+    data[video_link] = {
+        "transcription": transcription,
+        "embedding": embedding,
+    }
+
+    _write_store(json_file, data)
     print(f"Transcription saved to {json_file}.")
+
 
 nltk.download('stopwords')
 
 STOP_WORDS = set(stopwords.words('english'))
 
+
 def clean_text(text):
-    """
-    Preprocess text to remove special characters, numbers, and extra whitespace.
-    """
-    text = re.sub(r'[^a-zA-Z\s]', '', text)  # Remove non-alphabetic characters
-    text = re.sub(r'\s+', ' ', text).strip()  # Remove extra whitespace
+    """Preprocess text to remove special characters, numbers, and extra whitespace."""
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
     return text.lower()
 
+
 def is_meaningful(text):
-    """
-    Check if the text has a significant number of meaningful words.
-    """
+    """Check if the text has a significant number of non-stopword words."""
     words = text.split()
-    meaningful_words = [word for word in words if word not in STOP_WORDS]
-    return len(meaningful_words) > 2  # Require at least 3 meaningful words
+    meaningful_words = [w for w in words if w not in STOP_WORDS]
+    return len(meaningful_words) > 2
+
 
 def compute_bert_embeddings(text, max_chunk_tokens=510):
     """
@@ -173,50 +190,88 @@ def compute_bert_embeddings(text, max_chunk_tokens=510):
 
     return np.mean(chunk_embeddings, axis=0)
 
+
 def normalize_embeddings(embeddings):
     """Normalize embeddings to unit vectors."""
     norm = np.linalg.norm(embeddings, axis=1, keepdims=True) if embeddings.ndim > 1 else np.linalg.norm(embeddings)
     return embeddings / (norm + 1e-10)
 
-def search_transcriptions_by_context(input_text, json_file='video_transcriptions.json'):
+
+def _resolve_entry(video_link, entry, store):
     """
-    Search for videos whose transcriptions match the context of the input text.
+    Resolve a store entry to (cleaned_text, embedding_array_or_None).
+
+    Handles both the new dict schema and the legacy "transcription as a bare
+    string" schema. Legacy entries are migrated in-place: their embedding is
+    computed once and persisted so the next search is fast.
     """
+    if isinstance(entry, str):
+        cleaned = clean_text(entry)
+        emb = compute_bert_embeddings(cleaned) if is_meaningful(cleaned) else None
+        store[video_link] = {
+            "transcription": entry,
+            "embedding": emb.tolist() if emb is not None else None,
+        }
+        return cleaned, emb
+
+    transcription = entry.get("transcription", "")
+    cleaned = clean_text(transcription)
+    cached = entry.get("embedding")
+    if cached is not None:
+        return cleaned, np.array(cached, dtype=np.float32)
+    if not is_meaningful(cleaned):
+        return cleaned, None
+    emb = compute_bert_embeddings(cleaned)
+    entry["embedding"] = emb.tolist()
+    return cleaned, emb
+
+
+def search_transcriptions_by_context(
+    input_text,
+    json_file='video_transcriptions.json',
+    similarity_threshold=0.6,
+):
+    """Search for videos whose transcriptions match the context of the input."""
     if not os.path.exists(json_file):
         print("No transcriptions found.")
         return []
 
-    with open(json_file, 'r') as file:
-        data = json.load(file)
+    with open(json_file, 'r') as f:
+        data = json.load(f)
 
-    # Clean and validate input text
     input_text = clean_text(input_text)
     if not is_meaningful(input_text):
         print("Input text is not meaningful enough for searching.")
         return []
 
-    # Enrich single-word input by adding context
     if len(input_text.split()) == 1:
         input_text = f"The topic is about {input_text}."
 
-    # Compute normalized input text embeddings
-    input_embeddings = normalize_embeddings(compute_bert_embeddings(input_text).reshape(1, -1))
+    input_embeddings = normalize_embeddings(
+        compute_bert_embeddings(input_text).reshape(1, -1)
+    )
 
     matching_videos = []
-    for video_link, transcription in data.items():
-        # Clean and validate transcription
-        transcription = clean_text(transcription)
-        if not is_meaningful(transcription):
+    store_dirty = False
+
+    for video_link, entry in list(data.items()):
+        before_emb = entry.get("embedding") if isinstance(entry, dict) else None
+        cleaned, transcription_emb = _resolve_entry(video_link, entry, data)
+        if isinstance(data.get(video_link), dict):
+            after_emb = data[video_link].get("embedding")
+            if after_emb != before_emb:
+                store_dirty = True
+
+        if transcription_emb is None:
             continue
 
-        # Compute transcription embeddings and normalize
-        transcription_embeddings = normalize_embeddings(compute_bert_embeddings(transcription).reshape(1, -1))
+        transcription_emb = normalize_embeddings(transcription_emb.reshape(1, -1))
+        similarity = cosine_similarity(input_embeddings, transcription_emb)[0][0]
 
-        # Calculate cosine similarity
-        similarity = cosine_similarity(input_embeddings, transcription_embeddings)[0][0]
-
-        # Use a higher threshold for better filtering
-        if similarity > 0.6:  # You can tweak this threshold as per the use case
+        if similarity > similarity_threshold:
             matching_videos.append(video_link)
+
+    if store_dirty:
+        _write_store(json_file, data)
 
     return matching_videos
