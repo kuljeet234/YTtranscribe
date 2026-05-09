@@ -16,8 +16,19 @@ import re
 # at materially higher accuracy. Override via env var if you need
 # multilingual or a different size.
 WHISPER_MODEL_ID = os.environ.get("WHISPER_MODEL", "distil-whisper/distil-small.en")
+WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
 processor = WhisperProcessor.from_pretrained(WHISPER_MODEL_ID)
 model = WhisperForConditionalGeneration.from_pretrained(WHISPER_MODEL_ID)
+
+# English-only checkpoints (.en) bake in transcription-in-English; multilingual
+# checkpoints will silently translate unless we force language + task. Compute
+# the forced decoder ids once at import time and reuse for every chunk.
+if WHISPER_MODEL_ID.endswith(".en"):
+    FORCED_DECODER_IDS = None
+else:
+    FORCED_DECODER_IDS = processor.get_decoder_prompt_ids(
+        language=WHISPER_LANGUAGE, task="transcribe"
+    )
 
 # Load BERT model and tokenizer
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -75,8 +86,12 @@ def transcribe_audio_chunk(audio_chunk, sr):
     """Transcribe a single chunk of audio."""
     inputs = processor(audio_chunk, return_tensors="pt", sampling_rate=sr)
 
+    gen_kwargs = {}
+    if FORCED_DECODER_IDS is not None:
+        gen_kwargs["forced_decoder_ids"] = FORCED_DECODER_IDS
+
     with torch.no_grad():
-        generated_ids = model.generate(inputs.input_features)
+        generated_ids = model.generate(inputs.input_features, **gen_kwargs)
 
     transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
     return transcription
