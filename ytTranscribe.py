@@ -21,14 +21,10 @@ processor = WhisperProcessor.from_pretrained(WHISPER_MODEL_ID)
 model = WhisperForConditionalGeneration.from_pretrained(WHISPER_MODEL_ID)
 
 # English-only checkpoints (.en) bake in transcription-in-English; multilingual
-# checkpoints will silently translate unless we force language + task. Compute
-# the forced decoder ids once at import time and reuse for every chunk.
-if WHISPER_MODEL_ID.endswith(".en"):
-    FORCED_DECODER_IDS = None
-else:
-    FORCED_DECODER_IDS = processor.get_decoder_prompt_ids(
-        language=WHISPER_LANGUAGE, task="transcribe"
-    )
+# checkpoints will silently translate unless we force language + task. Modern
+# transformers (4.40+) takes language= and task= directly on generate(); the
+# older forced_decoder_ids API is deprecated in 4.50+.
+IS_ENGLISH_ONLY = WHISPER_MODEL_ID.endswith(".en")
 
 # Load BERT model and tokenizer
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -87,8 +83,9 @@ def transcribe_audio_chunk(audio_chunk, sr):
     inputs = processor(audio_chunk, return_tensors="pt", sampling_rate=sr)
 
     gen_kwargs = {}
-    if FORCED_DECODER_IDS is not None:
-        gen_kwargs["forced_decoder_ids"] = FORCED_DECODER_IDS
+    if not IS_ENGLISH_ONLY:
+        gen_kwargs["language"] = WHISPER_LANGUAGE
+        gen_kwargs["task"] = "transcribe"
 
     with torch.no_grad():
         generated_ids = model.generate(inputs.input_features, **gen_kwargs)
